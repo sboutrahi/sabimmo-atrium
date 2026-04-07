@@ -39,7 +39,7 @@ function authenticate(req, res) {
 
 function detectBuilding(name) {
     name = name.toLowerCase();
-    if (name.includes('philanthrop')) return 'philanthropie';
+    if (name.includes('philant')) return 'philanthropie';
     return null;
 }
 

@@ -8,6 +8,7 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "debug": "^4.4.3",
     "express": "^4.18.2",
     "http-atrium-cdvi": "^1.0.4"
   }

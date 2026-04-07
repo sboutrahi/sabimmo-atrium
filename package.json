@@ -1,0 +1,14 @@
+{
+  "name": "sabimmo-atrium-api",
+  "version": "1.0.0",
+  "description": "API locale pour automatiser les codes d'accès Atrium - SABIMMO Philanthropie",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "http-atrium-cdvi": "^1.0.4"
+  }
+}

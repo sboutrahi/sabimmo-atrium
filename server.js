@@ -7,6 +7,8 @@ app.use(express.json());
 
 const API_SECRET = 'sabimmo2026';
 const PORT = process.env.PORT || 3099;
+const TELEGRAM_TOKEN = '8673703990:AAHKnAmduUAQ3LKWdTw8Wt_IYfSJrJ4NLGI';
+const TELEGRAM_CHAT_ID = '7506192018';
 
 const BUILDINGS = {
     'philanthropie': {
@@ -122,11 +124,24 @@ function httpRequest(method, url, body, headers) {
     });
 }
 
+async function sendTelegram(message) {
+    try {
+        const body = JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message });
+        await httpRequest('POST',
+            'https://api.telegram.org/bot' + TELEGRAM_TOKEN + '/sendMessage',
+            body,
+            { 'Content-Type': 'application/json' }
+        );
+    } catch (err) {
+        console.error('Telegram error:', err.message);
+    }
+}
+
 async function atriumLogin(baseUrl, username, password) {
     const loginUrl = baseUrl + '/login.xml';
     const getResp = await httpRequest('GET', loginUrl, null, {});
     const keyMatch = getResp.body.match(/<KEY>([^<]+)<\/KEY>/);
-    if (!keyMatch) throw new Error('Impossible obtenir KEY Atrium: ' + getResp.body.substr(0, 200));
+    if (!keyMatch) throw new Error('Impossible obtenir KEY Atrium');
     const key = keyMatch[1];
     const encUser = rc4(key, username);
     const encPass = createHash('md5').update(key + password).digest('hex');
@@ -135,10 +150,9 @@ async function atriumLogin(baseUrl, username, password) {
         'Content-Type': 'application/x-www-form-urlencoded'
     });
     const newKeyMatch = postResp.body.match(/<KEY>([^<]+)<\/KEY>/);
-    if (!newKeyMatch) throw new Error('Login Atrium echoue: ' + postResp.body.substr(0, 200));
+    if (!newKeyMatch) throw new Error('Login Atrium echoue');
     const sessionKey = newKeyMatch[1];
     const cookieStr = postResp.cookies.map(c => c.split(';')[0]).join('; ');
-    console.log('Login Atrium OK');
     return { key: sessionKey, cookie: cookieStr };
 }
 
@@ -146,22 +160,18 @@ async function atriumGetUserId(baseUrl, session, firstName, lastName) {
     const url = baseUrl + '/users.xml?page_nb=1&user_name=' + encodeURIComponent(firstName.toLowerCase()) + '&_=' + Date.now();
     const resp = await httpRequest('GET', url, null, { 'Cookie': session.cookie });
     const decrypted = decryptResponse(resp.body, session.key);
-    console.log('Users XML (500 chars):', decrypted.substr(0, 500));
     const userTags = decrypted.match(/<USER[^>]*>/g) || [];
-    console.log('Nombre users trouves:', userTags.length);
     for (const tag of userTags) {
         const idMatch = tag.match(/\bid="(\d+)"/);
         const fnMatch = tag.match(/\bfn="([^"]*)"/);
         const lnMatch = tag.match(/\bln="([^"]*)"/);
         if (idMatch && fnMatch && lnMatch) {
-            console.log('User:', fnMatch[1], lnMatch[1], '- cherche:', firstName, lastName);
             if (fnMatch[1] === firstName && lnMatch[1] === lastName) {
-                console.log('User trouve! ID:', idMatch[1]);
                 return idMatch[1];
             }
         }
     }
-    throw new Error('User non trouve: ' + firstName + ' ' + lastName + '. Verifiez les noms dans Atrium.');
+    throw new Error('User non trouve: ' + firstName + ' ' + lastName);
 }
 
 async function atriumSetKeyCode(baseUrl, session, userId, pin) {
@@ -171,7 +181,6 @@ async function atriumSetKeyCode(baseUrl, session, userId, pin) {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Cookie': session.cookie
     });
-    console.log('Code PIN set OK');
 }
 
 async function atriumSetUserStatus(baseUrl, session, userId, firstName, lastName, active) {
@@ -181,7 +190,14 @@ async function atriumSetUserStatus(baseUrl, session, userId, firstName, lastName
         'Content-Type': 'application/x-www-form-urlencoded',
         'Cookie': session.cookie
     });
-    console.log('User status set OK');
+}
+
+async function activateInAtrium(room, pin, guest, building) {
+    const roomConfig = building.rooms[room];
+    const session = await atriumLogin(building.atrium_url, building.atrium_user, building.atrium_pass);
+    const userId = await atriumGetUserId(building.atrium_url, session, roomConfig.fn, roomConfig.ln);
+    await atriumSetKeyCode(building.atrium_url, session, userId, pin);
+    await atriumSetUserStatus(building.atrium_url, session, userId, roomConfig.fn, roomConfig.ln, true);
 }
 
 function generatePin() {
@@ -214,6 +230,7 @@ function detectRoom(name) {
     return null;
 }
 
+// J-5 : génère et stocke le code en mémoire
 app.post('/generate-code', async (req, res) => {
     if (!authenticate(req, res)) return;
     const { reservation_id, property_name, guest_name, checkin_date } = req.body;
@@ -224,10 +241,35 @@ app.post('/generate-code', async (req, res) => {
     if (!roomKey) return res.status(400).json({ error: 'Chambre non reconnue: ' + property_name });
     const pin = generatePin();
     pendingCodes[reservation_id] = { building: buildingKey, room: roomKey, pin, checkin_date, guest_name };
-    console.log('Code genere - ' + roomKey + ' | PIN: ' + pin);
+    console.log('Code genere - ' + roomKey + ' | PIN: ' + pin + ' | ' + guest_name);
     res.json({ success: true, pin, room: roomKey, building: buildingKey });
 });
 
+// Jour J à 12h : active depuis Make.com avec pin et room directement
+app.post('/activate-direct', async (req, res) => {
+    if (!authenticate(req, res)) return;
+    const { reservation_id, pin, room, guest_name, building_name } = req.body;
+    if (!reservation_id || !pin || !room) return res.status(400).json({ error: 'reservation_id, pin et room requis' });
+
+    const buildingKey = building_name ? detectBuilding(building_name) : 'philanthropie';
+    const building = BUILDINGS[buildingKey];
+    if (!building) return res.status(400).json({ error: 'Immeuble non reconnu' });
+    if (!building.rooms[room]) return res.status(400).json({ error: 'Chambre non reconnue: ' + room });
+
+    try {
+        console.log('=== ACTIVATION DIRECTE ' + room + ' | PIN:' + pin + ' | ' + guest_name + ' ===');
+        await activateInAtrium(room, pin, guest_name, building);
+        console.log('=== SUCCES ===');
+        await sendTelegram('✅ Code activé - Chambre ' + room + ' - Code: ' + pin + ' B - Guest: ' + (guest_name || '?'));
+        res.json({ success: true, room, pin, guest: guest_name });
+    } catch (err) {
+        console.error('=== ECHEC:', err.message, '===');
+        await sendTelegram('❌ ERREUR activation Philanthropie\nChambre: ' + room + '\nGuest: ' + (guest_name || '?') + '\nCode: ' + pin + '\nErreur: ' + err.message + '\n👉 Intervenir manuellement!');
+        res.status(500).json({ success: false, error: err.message, room, pin, guest: guest_name });
+    }
+});
+
+// Ancien endpoint (garde pour compatibilité)
 app.post('/activate-code', async (req, res) => {
     if (!authenticate(req, res)) return;
     const { reservation_id } = req.body;
@@ -235,19 +277,14 @@ app.post('/activate-code', async (req, res) => {
     const entry = pendingCodes[reservation_id];
     if (!entry) return res.status(404).json({ error: 'Aucun code en attente pour: ' + reservation_id });
     const building = BUILDINGS[entry.building];
-    const roomConfig = building.rooms[entry.room];
     try {
-        console.log('=== ACTIVATION ' + entry.room + ' PIN:' + entry.pin + ' ===');
-        const session = await atriumLogin(building.atrium_url, building.atrium_user, building.atrium_pass);
-        const userId = await atriumGetUserId(building.atrium_url, session, roomConfig.fn, roomConfig.ln);
-        await atriumSetKeyCode(building.atrium_url, session, userId, entry.pin);
-        await atriumSetUserStatus(building.atrium_url, session, userId, roomConfig.fn, roomConfig.ln, true);
+        await activateInAtrium(entry.room, entry.pin, entry.guest_name, building);
         delete pendingCodes[reservation_id];
-        console.log('=== SUCCES: Code ' + entry.pin + ' active pour ' + entry.room + ' ===');
+        await sendTelegram('✅ Code activé - Chambre ' + entry.room + ' - Code: ' + entry.pin + ' B - Guest: ' + (entry.guest_name || '?'));
         res.json({ success: true, room: entry.room, pin: entry.pin, guest: entry.guest_name });
     } catch (err) {
-        console.error('=== ECHEC ACTIVATION:', err.message, '===');
-        res.status(500).json({ success: false, error: err.message, room: entry.room, pin: entry.pin, guest: entry.guest_name });
+        await sendTelegram('❌ ERREUR activation Philanthropie\nChambre: ' + entry.room + '\nGuest: ' + (entry.guest_name || '?') + '\nErreur: ' + err.message + '\n👉 Intervenir!');
+        res.status(500).json({ success: false, error: err.message, room: entry.room, pin: entry.pin });
     }
 });
 
@@ -261,5 +298,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log('SABIMMO Atrium API v4 - Port ' + PORT + ' - Pret');
+    console.log('SABIMMO Atrium API v5 - Port ' + PORT + ' - Pret');
 });

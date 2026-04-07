@@ -82,7 +82,7 @@ app.post('/activate-code', async (req, res) => {
 
     const building = BUILDINGS[entry.building];
     const roomConfig = building.rooms[entry.room];
-    const log = { extend: () => () => {} };
+    function makeLog() { const f = (...a) => {}; f.extend = () => makeLog(); return f; } const log = makeLog();
     const agent = new AtriumCDVIAgent(log, building.atrium_url, building.atrium_user, building.atrium_pass);
 
     try {

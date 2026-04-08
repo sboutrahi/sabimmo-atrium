@@ -118,7 +118,7 @@ function httpRequest(method, url, body, headers) {
             res.on('end', () => resolve({ body: data, cookies, status: res.statusCode }));
         });
         req.on('error', reject);
-        req.setTimeout(15000, () => { req.destroy(); reject(new Error('Timeout connexion Atrium')); });
+        req.setTimeout(30000, () => { req.destroy(); reject(new Error('Timeout connexion Atrium')); });
         if (body) req.write(body);
         req.end();
     });

@@ -293,6 +293,44 @@ app.get('/pending', (req, res) => {
     res.json({ pending: pendingCodes, count: Object.keys(pendingCodes).length });
 });
 
+
+// GET /check-code - verifie le code actuel dans Atrium pour une chambre
+app.get('/check-code', async (req, res) => {
+    if (req.headers['x-api-key'] !== API_SECRET) return res.status(401).json({ error: 'Non autorise' });
+    const room = req.query.room;
+    const buildingKey = req.query.building || 'philanthropie';
+    if (!room) return res.status(400).json({ error: 'room requis (ex: ?room=vogelpik)' });
+    const bldg = BUILDINGS[buildingKey];
+    if (!bldg) return res.status(400).json({ error: 'Immeuble non reconnu: ' + buildingKey });
+    const roomConfig = bldg.rooms[room];
+    if (!roomConfig) return res.status(400).json({ error: 'Chambre non reconnue: ' + room });
+    try {
+        const session = await atriumLogin(bldg.atrium_url, bldg.atrium_user, bldg.atrium_pass);
+        const url = bldg.atrium_url + '/users.xml?page_nb=1&user_name=' + encodeURIComponent(roomConfig.fn.toLowerCase()) + '&_=' + Date.now();
+        const resp = await httpRequest('GET', url, null, { 'Cookie': session.cookie });
+        const decrypted = decryptResponse(resp.body, session.key);
+        // Extract code and status from user tags
+        const userTags = decrypted.match(/<USER[^>]*>/g) || [];
+        let code = 'non trouve';
+        let active = 'inconnu';
+        for (const tag of userTags) {
+            const fnMatch = tag.match(/fn="([^"]*)"/);
+            const lnMatch = tag.match(/ln="([^"]*)"/);
+            if (fnMatch && lnMatch && fnMatch[1] === roomConfig.fn && lnMatch[1] === roomConfig.ln) {
+                const enMatch = tag.match(/en="([^"]*)"/);
+                active = enMatch ? (enMatch[1] === '1' ? 'actif' : 'inactif') : 'inconnu';
+                break;
+            }
+        }
+        // Get key codes for this user
+        const codeMatch = decrypted.match(/code_num="([^"]+)"/);
+        if (codeMatch) code = codeMatch[1];
+        res.json({ success: true, room, fn: roomConfig.fn, ln: roomConfig.ln, code, active });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message, room });
+    }
+});
+
 app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString(), pending: Object.keys(pendingCodes).length });
 });
@@ -300,3 +338,5 @@ app.get('/health', (req, res) => {
 app.listen(PORT, () => {
     console.log('SABIMMO Atrium API v5 - Port ' + PORT + ' - Pret');
 });
+
+// PATCH: add check-code endpoint - insert before app.listen

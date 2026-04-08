@@ -183,8 +183,21 @@ async function atriumSetKeyCode(baseUrl, session, userId, pin) {
     });
 }
 
-async function atriumSetUserStatus(baseUrl, session, userId, firstName, lastName, active) {
-    const bodyStr = 'T_user_cmd=edit&T_user_id=' + userId + '&T_user_fn=' + firstName + '&T_user_ln=' + lastName + '&T_user_lang=0&T_user_a_yr=&T_user_a_month=&T_user_a_day=&T_user_a_hr=&T_user_a_min=&T_user_yr=&T_user_month=&T_user_day=&T_user_hr=&T_user_min=&T_user_en=' + (active ? 1 : 0) + '&T_user_program=0&T_user_ext_dly=0&T_user_o_anti=0&T_user_o_inter=0&T_user_can_arm=0&T_user_can_disarm=0';
+async function atriumSetUserStatus(baseUrl, session, userId, firstName, lastName, active, checkinDate, checkoutDate) {
+    // Parse validity dates
+    let a_yr='', a_month='', a_day='', a_hr='', a_min='';
+    let e_yr='', e_month='', e_day='', e_hr='', e_min='';
+    if (checkinDate) {
+        const ci = new Date(checkinDate);
+        a_yr = ci.getFullYear(); a_month = ci.getMonth()+1; a_day = ci.getDate();
+        a_hr = 12; a_min = 0; // check-in à 12h00
+    }
+    if (checkoutDate) {
+        const co = new Date(checkoutDate);
+        e_yr = co.getFullYear(); e_month = co.getMonth()+1; e_day = co.getDate();
+        e_hr = 11; e_min = 0; // check-out à 11h00
+    }
+    const bodyStr = 'T_user_cmd=edit&T_user_id=' + userId + '&T_user_fn=' + firstName + '&T_user_ln=' + lastName + '&T_user_lang=0&T_user_a_yr=' + a_yr + '&T_user_a_month=' + a_month + '&T_user_a_day=' + a_day + '&T_user_a_hr=' + a_hr + '&T_user_a_min=' + a_min + '&T_user_yr=' + e_yr + '&T_user_month=' + e_month + '&T_user_day=' + e_day + '&T_user_hr=' + e_hr + '&T_user_min=' + e_min + '&T_user_en=' + (active ? 1 : 0) + '&T_user_program=0&T_user_ext_dly=0&T_user_o_anti=0&T_user_o_inter=0&T_user_can_arm=0&T_user_can_disarm=0';
     const encrypted = encryptBody(bodyStr, session.key);
     await httpRequest('POST', baseUrl + '/users_T_user.xml', encrypted, {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -192,12 +205,13 @@ async function atriumSetUserStatus(baseUrl, session, userId, firstName, lastName
     });
 }
 
-async function activateInAtrium(room, pin, guest, building) {
+async function activateInAtrium(room, pin, guest, building, checkinDate, checkoutDate) {
     const roomConfig = building.rooms[room];
     const session = await atriumLogin(building.atrium_url, building.atrium_user, building.atrium_pass);
     const userId = await atriumGetUserId(building.atrium_url, session, roomConfig.fn, roomConfig.ln);
     await atriumSetKeyCode(building.atrium_url, session, userId, pin);
-    await atriumSetUserStatus(building.atrium_url, session, userId, roomConfig.fn, roomConfig.ln, true);
+    await atriumSetUserStatus(building.atrium_url, session, userId, roomConfig.fn, roomConfig.ln, true, checkinDate, checkoutDate);
+    console.log('Validite: ' + checkinDate + ' 12h00 -> ' + checkoutDate + ' 11h00');
 }
 
 function generatePin() {
@@ -256,9 +270,11 @@ app.post('/activate-direct', async (req, res) => {
     if (!building) return res.status(400).json({ error: 'Immeuble non reconnu' });
     if (!building.rooms[room]) return res.status(400).json({ error: 'Chambre non reconnue: ' + room });
 
+    const checkin_date = req.body.checkin_date;
+    const checkout_date = req.body.checkout_date;
     try {
-        console.log('=== ACTIVATION DIRECTE ' + room + ' | PIN:' + pin + ' | ' + guest_name + ' ===');
-        await activateInAtrium(room, pin, guest_name, building);
+        console.log('=== ACTIVATION DIRECTE ' + room + ' | PIN:' + pin + ' | ' + guest_name + ' | ' + checkin_date + ' -> ' + checkout_date + ' ===');
+        await activateInAtrium(room, pin, guest_name, building, checkin_date, checkout_date);
         console.log('=== SUCCES ===');
         await sendTelegram('✅ Code activé - Chambre ' + room + ' - Code: ' + pin + ' B - Guest: ' + (guest_name || '?'));
         res.json({ success: true, room, pin, guest: guest_name });
@@ -278,7 +294,7 @@ app.post('/activate-code', async (req, res) => {
     if (!entry) return res.status(404).json({ error: 'Aucun code en attente pour: ' + reservation_id });
     const building = BUILDINGS[entry.building];
     try {
-        await activateInAtrium(entry.room, entry.pin, entry.guest_name, building);
+        await activateInAtrium(entry.room, entry.pin, entry.guest_name, building, entry.checkin_date, entry.checkout_date);
         delete pendingCodes[reservation_id];
         await sendTelegram('✅ Code activé - Chambre ' + entry.room + ' - Code: ' + entry.pin + ' B - Guest: ' + (entry.guest_name || '?'));
         res.json({ success: true, room: entry.room, pin: entry.pin, guest: entry.guest_name });
